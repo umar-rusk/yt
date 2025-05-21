@@ -1,0 +1,215 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>YouTube Video Downloader</title>
+    <style>
+        body {
+            font-family: sans-serif;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            padding: 20px;
+            background-color: #f4f4f4;
+        }
+        .container {
+            background-color: #fff;
+            padding: 30px;
+            border-radius: 8px;
+            box-shadow: 0 0 10px rgba(0, 0, 0, 0.1);
+            width: 100%;
+            max-width: 600px;
+        }
+        h1 {
+            text-align: center;
+            color: #333;
+        }
+        textarea {
+            width: 95%;
+            min-height: 150px;
+            margin-bottom: 15px;
+            padding: 10px;
+            border: 1px solid #ddd;
+            border-radius: 4px;
+            font-size: 16px;
+        }
+        button {
+            display: block;
+            width: 100%;
+            padding: 12px;
+            background-color: #007bff;
+            color: white;
+            border: none;
+            border-radius: 4px;
+            font-size: 18px;
+            cursor: pointer;
+            transition: background-color 0.3s ease;
+        }
+        button:hover {
+            background-color: #0056b3;
+        }
+        #statusMessages {
+            margin-top: 20px;
+            padding: 10px;
+            border: 1px solid #ddd;
+            border-radius: 4px;
+            background-color: #e9ecef;
+            min-height: 50px;
+            color: #333;
+            white-space: pre-wrap; /* To respect newlines in messages */
+        }
+        .status-success { color: green; border-color: green; background-color: #e6ffe6; }
+        .status-error { color: red; border-color: red; background-color: #ffe6e6; }
+        .status-info { color: #333; border-color: #ddd; background-color: #e9ecef; }
+        .status-warning { color: orange; border-color: orange; background-color: #fff3e0; }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>YouTube Video Downloader</h1>
+        <textarea id="videoLinks" placeholder="Enter YouTube video links here, one per line..."></textarea>
+        <button id="downloadButton">Download Videos</button>
+        <div id="statusMessages" class="status-info">
+            Enter video links and click "Download Videos".
+        </div>
+    </div>
+    <script>
+        document.getElementById('downloadButton').addEventListener('click', async () => {
+            const videoLinksTextarea = document.getElementById('videoLinks');
+            const statusDiv = document.getElementById('statusMessages');
+            const downloadButton = document.getElementById('downloadButton');
+
+            const urls = videoLinksTextarea.value.split('\\n')
+                .map(url => url.trim())
+                .filter(url => url.length > 0);
+
+            if (urls.length === 0) {
+                statusDiv.textContent = 'Please enter at least one YouTube video link.';
+                statusDiv.className = 'status-error';
+                return;
+            }
+
+            statusDiv.textContent = `Requesting ${urls.length} video(s). Please wait... This may take a while.`;
+            statusDiv.className = 'status-info';
+            downloadButton.disabled = true;
+            videoLinksTextarea.disabled = true;
+
+            let messageBuilder = [];
+
+            try {
+                const response = await fetch('/download', {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json',
+                    },
+                    body: JSON.stringify({ urls: urls }),
+                });
+
+                const successfulDownloadsHeader = response.headers.get('X-Successful-Downloads');
+                const downloadErrorsHeader = response.headers.get('X-Download-Errors');
+
+                if (response.ok) {
+                    // Handle file download part
+                    const contentType = response.headers.get('Content-Type');
+                    if (contentType && (contentType.includes('application/zip') || contentType.includes('video/'))) {
+                        const blob = await response.blob();
+                        const objectUrl = window.URL.createObjectURL(blob);
+                        const a = document.createElement('a');
+                        a.style.display = 'none';
+                        a.href = objectUrl;
+
+                        let filename = 'downloaded_file'; // Default
+                        const disposition = response.headers.get('Content-Disposition');
+                        if (disposition && disposition.indexOf('attachment') !== -1) {
+                            const filenameRegex = /filename[^;=\\n]*=((['"]).*?\\2|[^;\\n]*)/;
+                            const matches = filenameRegex.exec(disposition);
+                            if (matches != null && matches[1]) {
+                                filename = matches[1].replace(/['"]/g, '');
+                            }
+                        } else if (contentType.includes('video/mp4')) {
+                            filename = 'video.mp4';
+                        } else if (contentType.includes('application/zip')) {
+                            filename = 'videos.zip';
+                        }
+                        
+                        a.download = filename;
+                        document.body.appendChild(a);
+                        a.click();
+                        window.URL.revokeObjectURL(objectUrl);
+                        document.body.removeChild(a);
+                        
+                        if (successfulDownloadsHeader) {
+                            const successes = JSON.parse(successfulDownloadsHeader);
+                            messageBuilder.push(`Successfully started download for: ${filename}`);
+                            successes.forEach(s => messageBuilder.push(`  - ${s.title || s.filename} (from ${s.original_url})`));
+                        } else {
+                            messageBuilder.push(`Download started: ${filename}`);
+                        }
+                         statusDiv.className = 'status-success';
+
+                    } else if (contentType && contentType.includes('application/json')) {
+                        // This case might occur if backend decides to send JSON even on 200 OK without a file.
+                        // e.g. if all URLs failed but it's handled as a 200 with error payload.
+                        // The current backend logic sends 500 if no files are downloaded.
+                        const data = await response.json();
+                        if (data.status === 'error' && data.errors) {
+                            messageBuilder.push('Download request processed, but with errors:');
+                            data.errors.forEach(err => messageBuilder.push(`  - URL: ${err.url}, Error: ${err.error}`));
+                            statusDiv.className = 'status-error';
+                        } else if (data.message) {
+                             messageBuilder.push(data.message);
+                             statusDiv.className = 'status-info';
+                        } else {
+                            messageBuilder.push('Received an unexpected JSON response from server.');
+                            statusDiv.className = 'status-warning';
+                        }
+                    } else {
+                         messageBuilder.push('Received an unexpected response type from server.');
+                         statusDiv.className = 'status-warning';
+                    }
+
+                    // Check for partial errors from header
+                    if (downloadErrorsHeader) {
+                        const errors = JSON.parse(downloadErrorsHeader);
+                        if (errors.length > 0) {
+                            messageBuilder.push("\\nSome videos failed to download:");
+                            errors.forEach(err => messageBuilder.push(`  - URL: ${err.url}, Error: ${err.error}`));
+                            // If there were also successes, it's a mixed result, so warning color.
+                            // If only errors (but response was somehow response.ok), it's an error.
+                            if (successfulDownloadsHeader) statusDiv.className = 'status-warning';
+                            else statusDiv.className = 'status-error';
+                        }
+                    }
+
+                } else { // !response.ok
+                    statusDiv.className = 'status-error';
+                    try {
+                        const errorData = await response.json();
+                        if (errorData && errorData.errors && Array.isArray(errorData.errors)) {
+                            messageBuilder.push('Download request failed:');
+                            errorData.errors.forEach(err => messageBuilder.push(`  - URL: ${err.url}, Error: ${err.error}`));
+                        } else if (errorData && errorData.error) { // Fallback for single error message
+                             messageBuilder.push(`Error: ${errorData.error}`);
+                        }else {
+                            messageBuilder.push(`Request failed: ${response.status} ${response.statusText}`);
+                        }
+                    } catch (e) {
+                        messageBuilder.push(`Request failed: ${response.status} ${response.statusText}. Could not parse error details.`);
+                    }
+                }
+            } catch (error) {
+                messageBuilder.push(`Network error or problem making the request: ${error.message}`);
+                statusDiv.className = 'status-error';
+            } finally {
+                statusDiv.textContent = messageBuilder.join('\\n') || 'Processing complete.';
+                if (messageBuilder.length === 0 && statusDiv.textContent === 'Processing complete.'){
+                    statusDiv.className = 'status-info'; // Default if no specific messages were built
+                }
+                downloadButton.disabled = false;
+                videoLinksTextarea.disabled = false;
+            }
+        });
+    </script>
+</body>
+</html>
